@@ -1,8 +1,6 @@
 import tensorflow as tf
 from tensorflow.contrib.seq2seq import BahdanauAttention
 
-from hparams import hparams
-
 
 # From https://github.com/tensorflow/tensorflow/blob/r1.7/tensorflow/contrib/seq2seq/python/ops/attention_wrapper.py
 def compute_attention(attention_mechanism, cell_output, attention_state,
@@ -92,7 +90,7 @@ class LocationSensitiveAttention(BahdanauAttention):
     LocationSensitiveAttention which is described in https://arxiv.org/pdf/1508.01991.pdf
     """
 
-    def __init__(self, num_units, memory, mask_encoder=True, memory_sequence_length=None, smoothing=False,
+    def __init__(self, num_units, memory, hparams, mask_encoder=True, memory_sequence_length=None, smoothing=False,
                  cumulate_weights=True,
                  name='LocationSensitiveAttention'):
         """Construct the Attention mechanism.

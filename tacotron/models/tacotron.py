@@ -49,6 +49,10 @@ class Tacotron(object):
             is_training = mel_targets is not None and not gta
             batch_size = tf.shape(inputs)[0]
 
+            assert self.hp.tacotron_teacher_forcing_mode in ('constant', 'scheduled')
+            if self.hp.tacotron_teacher_forcing_mode == 'scheduled' and is_training:
+                assert global_step is not None
+
             # GTA is only use for predict mel spectrogram to train WaveNet Vocoder
             post_condition = self.hp.predict_linear and not gta
 
@@ -75,6 +79,7 @@ class Tacotron(object):
                             scope='decoder_prenet')
             # =====> Attention Mechanism(location sensitive attention)
             attention_mechanism = LocationSensitiveAttention(self.hp.attention_dim, encoder_outputs,
+                                                             self.hp,
                                                              mask_encoder=self.hp.mask_encoder,
                                                              memory_sequence_length=input_lengths,
                                                              smoothing=self.hp.smoothing,
@@ -86,15 +91,15 @@ class Tacotron(object):
             # =====> Frames Projection Layer
             frame_projection = FrameProjection(self.hp.num_mels * self.hp.outputs_per_step, scope='linear_transform')
             # =====> Stop-Token Projection Layer
-            stop_projection = StopProjection(is_training, size=self.hp.outputs_per_step, scope='stop_token_projection')
+            stop_projection = StopProjection(is_training, self.hp.outputs_per_step, scope='stop_token_projection')
             # =====> Combine Decoder Modules
 
             decoder_cell = TacotronDecoderWrapper(
-                prenet=prenet,
-                attention_mechanism=attention_mechanism,
-                rnn=decoder_lstm,
-                frame_projection=frame_projection,
-                stop_projection=stop_projection
+                prenet,
+                attention_mechanism,
+                decoder_lstm,
+                frame_projection,
+                stop_projection
             )
 
             # Define the helper for our decoder
@@ -220,7 +225,7 @@ class Tacotron(object):
             self.linear_loss = linear_loss
 
             self.loss = self.before_loss + self.after_loss + self.stop_token_loss \
-                            + self.regularization_loss + self.linear_loss
+                        + self.regularization_loss + self.linear_loss
 
     def add_optimizer(self, global_step):
         """Adds optimizer. Sets "gradients" and "optimize" fields. add_loss must have been called.

@@ -77,11 +77,7 @@ class TacoTrainingHelper(Helper):
             # Feed every r-th target frame as input
             self._targets = targets[:, r - 1::r, :]
 
-            # if not gta:
-            #     # Detect finished sequence using stop_targets
-            #     self._stop_targets = stop_targets[:, r - 1::r]
-            # else:
-            #     # GTA synthesis
+            # Maximal sequence length
             self._lengths = tf.tile([tf.shape(self._targets)[1]], [self._batch_size])
 
     @property
@@ -105,7 +101,7 @@ class TacoTrainingHelper(Helper):
         # In GTA mode, override teacher forcing scheme to work with full teacher forcing
         if self.gta:
             self.ratio = tf.convert_to_tensor(1.)  # Force GTA model to always feed ground-truth
-        elif self.eval:
+        elif self.eval and self._hparams.natural_eval:
             self.ratio = tf.convert_to_tensor(0.)  # Force eval model to always feed predictions
         else:
             if self._hparams.tacotron_teacher_forcing_mode == 'scheduled':
@@ -131,7 +127,6 @@ class TacoTrainingHelper(Helper):
                 tf.less(tf.random_uniform([], minval=0, maxval=1, dtype=tf.float32), self.ratio),
                 lambda: self._targets[:, time, :],  # Teacher-forcing: return true frame
                 lambda: outputs[:, -self._output_dim:])
-            next_inputs = outputs[:, -self._output_dim:]
 
             next_inputs = tf.reshape(next_inputs, [-1, self._output_dim])
             # Pass on state
@@ -140,7 +135,7 @@ class TacoTrainingHelper(Helper):
 
 
 def _go_frames(batch_size, output_dim):
-    '''Returns all-zero <GO> frames for a given batch size and output dimension'''
+    """Returns all-zero <GO> frames for a given batch size and output dimension"""
     return tf.tile([[0.0]], [batch_size, output_dim])
 
 
@@ -152,16 +147,16 @@ def _teacher_forcing_ratio_decay(init_tfr, global_step, hparams):
     # We only start learning rate decay after 10k steps
 
     # Phase 2: tfr in ]0, 1[
-    # decay reach minimal value at step ~220k
+    # decay reach minimal value at step ~280k
 
     # Phase 3: tfr = 0
-    # clip by minimal teacher forcing ratio value (step >~ 220k)
+    # clip by minimal teacher forcing ratio value (step >~ 280k)
     #################################################################
     # Compute natural cosine decay
     tfr = tf.train.cosine_decay(init_tfr,
                                 global_step=global_step - hparams.tacotron_teacher_forcing_start_decay,
                                 # tfr = 1 at step 10k
-                                decay_steps=hparams.tacotron_teacher_forcing_decay_steps,  # tfr = 0 at step ~220k
+                                decay_steps=hparams.tacotron_teacher_forcing_decay_steps,  # tfr = 0 at step ~280k
                                 alpha=hparams.tacotron_teacher_forcing_decay_alpha,
                                 # tfr = 0% of init_tfr as final value
                                 name='tfr_cosine_decay')

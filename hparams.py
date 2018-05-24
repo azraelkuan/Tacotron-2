@@ -153,6 +153,10 @@ hparams = tf.contrib.training.HParams(
     tacotron_zoneout_rate=0.1,  # zoneout rate for all LSTM cells in the network
     tacotron_dropout_rate=0.5,  # dropout rate for all convolutional layers + prenet
 
+    # Whether to use 100% natural eval (to evaluate Curriculum Learning performance)
+    # or with same teacher-forcing ratio as training (just for overfit)
+    natural_eval=True,
+
     # Decoder RNN learning can take be done in one of two ways:
     #	Teacher Forcing: vanilla teacher forcing (usually with ratio = 1). mode='constant'
     #	Curriculum Learning Scheme: From Teacher-Forcing to sampling from previous outputs is function of global step. (teacher forcing ratio decay) mode='scheduled'

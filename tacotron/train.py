@@ -41,6 +41,15 @@ def train(log_dir, args, hp):
     plot_dir = os.path.join(log_dir, 'plots')
     wav_dir = os.path.join(log_dir, 'wavs')
     mel_dir = os.path.join(log_dir, 'mel-spectrograms')
+    os.makedirs(save_dir, exist_ok=True)
+    os.makedirs(plot_dir, exist_ok=True)
+    os.makedirs(save_dir, exist_ok=True)
+    os.makedirs(wav_dir, exist_ok=True)
+    os.makedirs(mel_dir, exist_ok=True)
+
+    if hparams.predict_linear:
+        linear_dir = os.path.join(log_dir, 'linear-spectrograms')
+        os.makedirs(linear_dir, exist_ok=True)
 
     # get train data
     train_dataset = get_dataset(meta_file=args.tacotron_train_file, shuffle=True)
@@ -62,8 +71,8 @@ def train(log_dir, args, hp):
     with tf.variable_scope('model'):
         model = create_model('Tacotron', hp)
         if hp.predict_linear:
-            model.initialize(inputs, input_lengths, mel_targets, token_targets, linear_targets, target_lengths,
-                             global_step=global_step, is_training=True)
+            model.initialize(inputs, input_lengths, mel_targets, token_targets, linear_targets,
+                             target_lengths=target_lengths, global_step=global_step, is_training=True)
         else:
             model.initialize(inputs, input_lengths, mel_targets, token_targets, target_lengths=target_lengths,
                              global_step=global_step, is_training=True)
@@ -73,9 +82,10 @@ def train(log_dir, args, hp):
         val_stats = add_stats(model, hp, 'val_stats')
 
     # Book keeping
-    time_window = ValueWindow(100)
+    train_time_window = ValueWindow(100)
     train_loss_window = ValueWindow(100)
-    val_loss_window = ValueWindow(1000)
+    val_time_window = ValueWindow(100)
+    val_loss_window = ValueWindow(100)
     saver = tf.train.Saver(max_to_keep=5, keep_checkpoint_every_n_hours=2)
 
     # add gpu config for memory use
@@ -93,22 +103,17 @@ def train(log_dir, args, hp):
 
             # for every epoch, need to init the iterator
             sess.run(train_init)
-            # for i in range(100):
-            #     start_time = time.time()
-            #     sess.run(inputs)
-            #     time_inter = time.time() - start_time
-            #     print("Step: {} time: {}".format(i, time_inter))
 
             while True:
                 try:
                     start_time = time.time()
 
                     step, loss, _ = sess.run([global_step, model.loss, model.optimize])
-                    time_window.append(time.time() - start_time)
+                    train_time_window.append(time.time() - start_time)
                     train_loss_window.append(loss)
 
                     message = 'Epoch {:7d} Step {:7d} [{:.3f} sec/Step, Train_Loss={:.5f}, Avg_Loss={:.5f}]'.format(
-                        epoch, step, time_window.average, loss, train_loss_window.average)
+                        epoch, step, train_time_window.average, loss, train_loss_window.average)
 
                     print(message)
 
@@ -126,21 +131,25 @@ def train(log_dir, args, hp):
 
                     sys.stdout.flush()
                 except tf.errors.OutOfRangeError:
+                    print('Begin next val epoch')
                     break
 
             # ================================== Val Process ================================== #
+
+            # for every epoch, need to init the iterator
             sess.run(val_init)
+
             while True:
                 try:
                     start_time = time.time()
 
-                    loss = sess.run([model.loss])
+                    loss = sess.run(model.loss)
 
-                    time_window.append(time.time() - start_time)
+                    val_time_window.append(time.time() - start_time)
                     val_loss_window.append(loss)
 
                     message = 'Epoch {:7d} Step {:7d} [{:.3f} sec/Step, Val_Loss={:.5f}, Avg_Loss={:.5f}]'.format(
-                        epoch, global_val_step, time_window.average, loss, train_loss_window.average)
+                        epoch, global_val_step, val_time_window.average, loss, train_loss_window.average)
                     print(message)
 
                     if global_val_step % args.summary_interval == 0:
@@ -149,6 +158,7 @@ def train(log_dir, args, hp):
 
                     sys.stdout.flush()
                 except tf.errors.OutOfRangeError:
+                    print('Begin next train epoch')
                     break
 
 

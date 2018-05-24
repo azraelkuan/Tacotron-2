@@ -1,6 +1,20 @@
 import tensorflow as tf
 
 
+def conv1d(inputs, kernel_size, channels, activation, is_training, drop_rate, scope):
+    with tf.variable_scope(scope):
+        conv1d_output = tf.layers.conv1d(
+            inputs,
+            filters=channels,
+            kernel_size=kernel_size,
+            activation=None,
+            padding='same')
+        batched = tf.layers.batch_normalization(conv1d_output, training=is_training)
+        activated = activation(batched)
+        return tf.layers.dropout(activated, rate=drop_rate, training=is_training,
+                                 name='dropout_{}'.format(scope))
+
+
 class ZoneoutLSTMCell(tf.nn.rnn_cell.RNNCell):
     """Wrapper for tf LSTM to create Zoneout LSTM Cell
     inspired by:
@@ -66,22 +80,6 @@ class ZoneoutLSTMCell(tf.nn.rnn_cell.RNNCell):
         return output, new_state
 
 
-def conv1d(inputs, kernel_size, channels, activation, is_training, drop_rate, scope):
-    """Construct a new conv combined by conv, batch norm and activation."""
-
-    with tf.variable_scope(scope):
-        conv1d_output = tf.layers.conv1d(
-            inputs,
-            filters=channels,
-            kernel_size=kernel_size,
-            activation=None,
-            padding='same')
-        batched = tf.layers.batch_normalization(conv1d_output, training=is_training)
-        activated = activation(batched)
-        return tf.layers.dropout(activated, rate=drop_rate, training=is_training,
-                                 name='dropout_{}'.format(scope))
-
-
 class EncoderConv(object):
     """
     Encoder Convolutional layers used to find local dependencies in inputs characters.
@@ -90,11 +88,12 @@ class EncoderConv(object):
     def __init__(self, is_training, hparams, activation=tf.nn.relu, scope=None):
         super(EncoderConv, self).__init__()
         self.is_training = is_training
+
         self.kernel_size = hparams.enc_conv_kernel_size
         self.channels = hparams.enc_conv_channels
         self.activation = activation
+        self.scope = 'enc_conv_layers' if scope is None else scope
         self.drop_rate = hparams.tacotron_dropout_rate
-        self.scope = 'encoder_conv' if scope is None else scope
         self.enc_conv_num_layers = hparams.enc_conv_num_layers
 
     def __call__(self, inputs):
@@ -113,22 +112,34 @@ class EncoderRNN(object):
 
     def __init__(self, is_training, size=256, zoneout=0.1, scope=None):
         super(EncoderRNN, self).__init__()
+
         self.is_training = is_training
+
         self.size = size
         self.zoneout = zoneout
         self.scope = 'encoder_LSTM' if scope is None else scope
 
-        self._cell = ZoneoutLSTMCell(num_units=size, is_training=is_training, zoneout_factor_cell=zoneout,
-                                     zoneout_factor_output=zoneout, name='encoder_bw_LSTM')
+        # Create forward LSTM Cell
+        self._fw_cell = ZoneoutLSTMCell(size, is_training,
+                                        zoneout_factor_cell=zoneout,
+                                        zoneout_factor_output=zoneout,
+                                        name='encoder_fw_LSTM')
+
+        # Create backward LSTM Cell
+        self._bw_cell = ZoneoutLSTMCell(size, is_training,
+                                        zoneout_factor_cell=zoneout,
+                                        zoneout_factor_output=zoneout,
+                                        name='encoder_bw_LSTM')
 
     def __call__(self, inputs, input_lengths):
         with tf.variable_scope(self.scope):
-            outputs, _ = tf.nn.bidirectional_dynamic_rnn(
-                self._cell,
-                self._cell,
+            outputs, (fw_state, bw_state) = tf.nn.bidirectional_dynamic_rnn(
+                self._fw_cell,
+                self._bw_cell,
                 inputs,
                 sequence_length=input_lengths,
-                dtype=tf.float32)
+                dtype=tf.float32,
+                swap_memory=True)
 
             return tf.concat(outputs, axis=2)  # Concat and return forward + backward outputs
 
@@ -139,21 +150,25 @@ class PreNet(object):
     """
 
     def __init__(self, is_training, layer_sizes=[256, 256], drop_rate=0.5, activation=tf.nn.relu, scope=None):
+        self.drop_rate = drop_rate
         self.is_training = is_training
+
         self.layer_sizes = layer_sizes
         self.activation = activation
-        self.drop_rate = drop_rate
-        self.scope = 'decoder_prenet' if scope is None else scope
+        self.is_training = is_training
+
+        self.scope = 'prenet' if scope is None else scope
 
     def __call__(self, inputs):
         x = inputs
+
         with tf.variable_scope(self.scope):
-            for i, layer_size in enumerate(self.layer_sizes):
-                x = tf.layers.dense(inputs=x, units=layer_size,
-                                    activation=self.activation, name='dense_{}'.format(i))
+            for i, size in enumerate(self.layer_sizes):
+                dense = tf.layers.dense(x, units=size, activation=self.activation,
+                                        name='dense_{}'.format(i + 1))
                 # The paper discussed introducing diversity in generation at inference time
                 # by using a dropout of 0.5 only in prenet layers (in both training and inference).
-                x = tf.layers.dropout(x, rate=self.drop_rate, training=True,
+                x = tf.layers.dropout(dense, rate=self.drop_rate, training=True,
                                       name='dropout_{}'.format(i + 1) + self.scope)
         return x
 
@@ -166,14 +181,19 @@ class DecoderRNN(object):
     def __init__(self, is_training, layers=2, size=1024, zoneout=0.1, scope=None):
         super(DecoderRNN, self).__init__()
         self.is_training = is_training
+
+        self.layers = layers
         self.size = size
+        self.zoneout = zoneout
         self.scope = 'decoder_rnn' if scope is None else scope
 
+        # Create a set of LSTM layers
         self.rnn_layers = [ZoneoutLSTMCell(size, is_training,
                                            zoneout_factor_cell=zoneout,
                                            zoneout_factor_output=zoneout,
                                            name='decoder_LSTM_{}'.format(i + 1)) for i in range(layers)]
-        self.cell = tf.nn.rnn_cell.MultiRNNCell(self.rnn_layers, state_is_tuple=True)
+
+        self.cell = tf.contrib.rnn.MultiRNNCell(self.rnn_layers, state_is_tuple=True)
 
     def __call__(self, inputs, states):
         # In this module, we only return the cell for the later attention.
@@ -197,13 +217,13 @@ class FrameProjection(object):
         self.activation = activation
 
         self.scope = 'linear_projection' if scope is None else scope
+        self.dense = tf.layers.Dense(units=size, activation=activation, name='projection_{}'.format(self.scope))
 
     def __call__(self, inputs):
         with tf.variable_scope(self.scope):
             # If activation==None, this returns a simple Linear projection
             # else the projection will be passed through an activation function
-            output = tf.layers.dense(inputs, units=self.size, activation=self.activation,
-                                     name='projection_{}'.format(self.scope))
+            output = self.dense(inputs)
             return output
 
 
@@ -255,9 +275,9 @@ class Postnet(object):
         self.kernel_size = hparams.postnet_kernel_size
         self.channels = hparams.postnet_channels
         self.activation = activation
+        self.scope = 'postnet_convolutions' if scope is None else scope
         self.postnet_num_layers = hparams.postnet_num_layers
         self.drop_rate = hparams.tacotron_dropout_rate
-        self.scope = 'postnet_convolutions' if scope is None else scope
 
     def __call__(self, inputs):
         with tf.variable_scope(self.scope):
@@ -334,4 +354,3 @@ def masked_sigmoid_ce(targets, outputs, targets_lengths, hparams, mask=None):
         masked_loss = losses * mask
 
     return tf.reduce_sum(masked_loss) / tf.count_nonzero(masked_loss, dtype=tf.float32)
-
