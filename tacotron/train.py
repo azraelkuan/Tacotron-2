@@ -3,13 +3,23 @@ import sys
 import time
 import argparse
 import numpy as np
+from datetime import datetime
 
 import tensorflow as tf
 
+import infolog
+from datasets import audio
 from tacotron.feeder import get_dataset
 from tacotron.models import create_model
-from tacotron.utils import ValueWindow
+from tacotron.utils import ValueWindow, plot
 from hparams import hparams
+
+
+log = infolog.log
+
+
+def time_string():
+    return datetime.now().strftime('%Y-%m-%d %H:%M')
 
 
 def add_stats(model, hp, scope):
@@ -84,9 +94,9 @@ def train(log_dir, args, hp):
     # Book keeping
     train_time_window = ValueWindow(100)
     train_loss_window = ValueWindow(100)
-    val_time_window = ValueWindow(100)
-    val_loss_window = ValueWindow(100)
     saver = tf.train.Saver(max_to_keep=5, keep_checkpoint_every_n_hours=2)
+    run_metadata = tf.RunMetadata()
+    run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
 
     # add gpu config for memory use
     config = tf.ConfigProto()
@@ -108,22 +118,27 @@ def train(log_dir, args, hp):
                 try:
                     start_time = time.time()
 
-                    step, loss, _ = sess.run([global_step, model.loss, model.optimize])
+                    step, loss, _, mel_p, mel_t, t_len, align = sess.run([global_step, model.loss, model.optimize,
+                                                                          model.mel_outputs[0], model.mel_targets[0],
+                                                                          model.target_lengths[0], model.alignments[0]])
                     train_time_window.append(time.time() - start_time)
                     train_loss_window.append(loss)
 
-                    message = 'Epoch {:7d} Step {:7d} [{:.3f} sec/Step, Train_Loss={:.5f}, Avg_Loss={:.5f}]'.format(
+                    message = 'Epoch {:3d} Step {:7d} [{:.3f} sec/Step, Train_Loss={:.5f}, Avg_Loss={:.5f}]'.format(
                         epoch, step, train_time_window.average, loss, train_loss_window.average)
 
-                    print(message)
+                    log(message)
 
                     if loss > 1000 or np.isnan(loss):
-                        print('Loss exploded to {:.5f} at step {}'.format(loss, step))
+                        log('Loss exploded to {:.5f} at step {}'.format(loss, step))
                         raise Exception('Loss exploded')
 
                     if step % args.summary_interval == 0:
-                        print('Writing summary at step {}'.format(step))
-                        summary_writer.add_summary(sess.run(train_stats), step)
+                        stats = sess.run(train_stats, options=run_options, run_metadata=run_metadata)
+
+                        log('Writing summary at step {}'.format(step))
+                        summary_writer.add_summary(stats, step)
+                        summary_writer.add_run_metadata(run_metadata, 'step_{:7d}'.format(step))
 
                     if step % args.checkpoint_interval == 0:
                         # Save model and current global step
@@ -131,35 +146,58 @@ def train(log_dir, args, hp):
 
                     sys.stdout.flush()
                 except tf.errors.OutOfRangeError:
-                    print('Begin next val epoch')
+                    # save status
+                    save_debug_info(step, mel_p, mel_t, t_len, align, loss, wav_dir, plot_dir, args, mode='val')
+
+                    log('Begin next val epoch')
                     break
 
             # ================================== Val Process ================================== #
 
             # for every epoch, need to init the iterator
             sess.run(val_init)
-
+            val_loss = []
             while True:
                 try:
-                    start_time = time.time()
 
-                    loss = sess.run(model.loss)
+                    loss, mel_p, mel_t, t_len, align = sess.run([model.loss, model.mel_outputs[0], model.mel_targets[0],
+                                                                 model.target_lengths[0], model.alignments[0]])
 
-                    val_time_window.append(time.time() - start_time)
-                    val_loss_window.append(loss)
-
-                    message = 'Epoch {:7d} Step {:7d} [{:.3f} sec/Step, Val_Loss={:.5f}, Avg_Loss={:.5f}]'.format(
-                        epoch, global_val_step, val_time_window.average, loss, train_loss_window.average)
-                    print(message)
+                    val_loss.append(loss)
 
                     if global_val_step % args.summary_interval == 0:
-                        print('Writing summary at step {}'.format(step))
+                        log('Writing summary at step {}'.format(step))
                         summary_writer.add_summary(sess.run(val_stats), step)
 
                     sys.stdout.flush()
                 except tf.errors.OutOfRangeError:
-                    print('Begin next train epoch')
+                    avg_loss = sum(val_loss) / len(val_loss)
+                    # save status
+                    save_debug_info(step, mel_p, mel_t, t_len, align, avg_loss, wav_dir, plot_dir, args, mode='val')
+
+                    # log val loss
+                    message = '==========> Epoch {:3d} Val_Avg_Loss={:.5f}] <=========='.format(
+                        epoch, avg_loss)
+                    log(message)
+
+                    log('Begin next train epoch')
                     break
+
+
+def save_debug_info(step, mel_p, mel_t, t_len, align, loss, wav_dir, plot_dir, args, mode='train'):
+    """save audio and alignment."""
+    wav = audio.inv_mel_spectrogram(mel_p.T, hparams)
+    audio.save_wav(wav, os.path.join(wav_dir, 'step-{}-{}-waveform-mel.wav'.format(step, mode)),
+                   sr=hparams.sample_rate)
+    plot.plot_alignment(align, os.path.join(plot_dir, 'step-{}-{}-align.png'.format(step, mode)),
+                        info='{}, {}, step={}, loss={:.5f}'.format(args.model, time_string(), step,
+                                                                   loss),
+                        max_len=t_len // hparams.outputs_per_step)
+    plot.plot_spectrogram(mel_p,
+                          os.path.join(plot_dir, 'step-{}-{}-mel-spectrogram.png'.format(step, mode)),
+                          info='{}, {}, step={}, loss={:.5}'.format(args.model, time_string(), step,
+                                                                    loss), target_spectrogram=mel_t,
+                          max_len=t_len)
 
 
 def prepare_run(args):
@@ -168,6 +206,7 @@ def prepare_run(args):
     run_name = args.name or args.model
     log_dir = os.path.join(args.base_dir, 'logs-{}'.format(run_name))
     os.makedirs(log_dir, exist_ok=True)
+    infolog.init(os.path.join(log_dir, 'train_tacotron.log'), run_name)
     return log_dir, modified_hp
 
 
