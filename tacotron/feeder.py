@@ -104,7 +104,7 @@ def get_dataset(meta_file, shuffle):
     dataset = dataset.padded_batch(hparams.tacotron_batch_size,
                                    padded_shapes=([None], [None, None], [None], [None, None], [], []),
                                    padding_values=(_pad, _target_pad, _token_pad, _target_pad, _pad, _pad))
-    dataset = dataset.cache()
-    return dataset.prefetch(buffer_size=_batches_per_group)
+    # dataset = dataset.cache()
+    return dataset.prefetch(buffer_size=4)
 
 

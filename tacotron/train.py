@@ -14,7 +14,6 @@ from tacotron.models import create_model
 from tacotron.utils import ValueWindow, plot
 from hparams import hparams
 
-
 log = infolog.log
 
 
@@ -74,7 +73,7 @@ def train(log_dir, args, hp):
     val_init = iterator.make_initializer(val_dataset)
 
     # define global step
-    global_step = tf.Variable(0, name='global_step', trainable=False)
+    global_step = tf.Variable(-1, name='global_step', trainable=False)
     global_val_step = 0
 
     # define model
@@ -95,8 +94,6 @@ def train(log_dir, args, hp):
     train_time_window = ValueWindow(100)
     train_loss_window = ValueWindow(100)
     saver = tf.train.Saver(max_to_keep=5, keep_checkpoint_every_n_hours=2)
-    run_metadata = tf.RunMetadata()
-    run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
 
     # add gpu config for memory use
     config = tf.ConfigProto()
@@ -107,20 +104,27 @@ def train(log_dir, args, hp):
         summary_writer = tf.summary.FileWriter(log_dir, sess.graph)
         # init all the variable
         sess.run(tf.global_variables_initializer())
+
         for epoch in range(args.tacotron_train_epochs):
 
             # ================================== Train Process ================================== #
 
             # for every epoch, need to init the iterator
             sess.run(train_init)
+            debug = True
 
             while True:
                 try:
                     start_time = time.time()
-
-                    step, loss, _, mel_p, mel_t, t_len, align = sess.run([global_step, model.loss, model.optimize,
-                                                                          model.mel_outputs[0], model.mel_targets[0],
-                                                                          model.target_lengths[0], model.alignments[0]])
+                    if debug:
+                        step, loss, _, mel_p, mel_t, t_len, align = sess.run([global_step, model.loss, model.optimize,
+                                                                              model.mel_outputs[0],
+                                                                              model.mel_targets[0],
+                                                                              model.target_lengths[0],
+                                                                              model.alignments[0]])
+                        debug = False
+                    else:
+                        step, loss, _ = sess.run([global_step, model.loss, model.optimize])
                     train_time_window.append(time.time() - start_time)
                     train_loss_window.append(loss)
 
@@ -134,11 +138,10 @@ def train(log_dir, args, hp):
                         raise Exception('Loss exploded')
 
                     if step % args.summary_interval == 0:
-                        stats = sess.run(train_stats, options=run_options, run_metadata=run_metadata)
+                        stats = sess.run(train_stats)
 
                         log('Writing summary at step {}'.format(step))
                         summary_writer.add_summary(stats, step)
-                        summary_writer.add_run_metadata(run_metadata, 'step_{:7d}'.format(step))
 
                     if step % args.checkpoint_interval == 0:
                         # Save model and current global step
@@ -156,12 +159,16 @@ def train(log_dir, args, hp):
 
             # for every epoch, need to init the iterator
             sess.run(val_init)
+            debug = True
             val_loss = []
             while True:
                 try:
-
-                    loss, mel_p, mel_t, t_len, align = sess.run([model.loss, model.mel_outputs[0], model.mel_targets[0],
-                                                                 model.target_lengths[0], model.alignments[0]])
+                    if debug:
+                        loss, mel_p, mel_t, t_len, align = sess.run(
+                            [model.loss, model.mel_outputs[0], model.mel_targets[0],
+                             model.target_lengths[0], model.alignments[0]])
+                    else:
+                        loss = sess.run(model.loss)
 
                     val_loss.append(loss)
 
@@ -169,11 +176,12 @@ def train(log_dir, args, hp):
                         log('Writing summary at step {}'.format(step))
                         summary_writer.add_summary(sess.run(val_stats), step)
 
+                    global_val_step += 1
                     sys.stdout.flush()
                 except tf.errors.OutOfRangeError:
                     avg_loss = sum(val_loss) / len(val_loss)
                     # save status
-                    save_debug_info(step, mel_p, mel_t, t_len, align, avg_loss, wav_dir, plot_dir, args, mode='val')
+                    # save_debug_info(step, mel_p, mel_t, t_len, align, avg_loss, wav_dir, plot_dir, args, mode='val')
 
                     # log val loss
                     message = '==========> Epoch {:3d} Val_Avg_Loss={:.5f}] <=========='.format(
@@ -230,7 +238,7 @@ def main():
                         help='Steps between eval on test data')
     parser.add_argument('--tacotron_train_epochs', type=int, default=200,
                         help='total number of tacotron training steps')
-    parser.add_argument('--tf_log_level', type=int, default=1, help='Tensorflow C++ log level.')
+    parser.add_argument('--tf_log_level', type=int, default=3, help='Tensorflow C++ log level.')
     args = parser.parse_args()
 
     log_dir, hp = prepare_run(args)
