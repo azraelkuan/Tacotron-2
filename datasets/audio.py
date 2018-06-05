@@ -6,6 +6,30 @@ import tensorflow as tf
 from scipy.io import wavfile
 
 
+def adjust_time_resolution(quantized, mel, hparams):
+    """Adjust time resolution by repeating features
+    Args:
+        quantized (ndarray): (T,)
+        mel (ndarray): (N, D)
+    Returns:
+        tuple: Tuple of (T,) and (T, D)
+    """
+    assert len(quantized.shape) == 1
+    assert len(mel.shape) == 2
+
+    upsample_factor = quantized.size // mel.shape[0]
+    mel = np.repeat(mel, upsample_factor, axis=0)
+    n_pad = quantized.size - mel.shape[0]
+    if n_pad != 0:
+        assert n_pad > 0
+        mel = np.pad(mel, [(0, n_pad), (0, 0)], mode="constant", constant_values=0)
+
+    # trim
+    start, end = start_and_end_indices(quantized, hparams.silence_threshold)
+
+    return quantized[start:end], mel[start:end, :]
+
+
 def load_wav(path, sr):
     return librosa.core.load(path, sr=sr)[0]
 
@@ -32,12 +56,8 @@ def start_and_end_indices(quantized, silence_threshold=2):
 
 
 def trim_silence(wav, hparams):
-    '''Trim leading and trailing silence
-
-	Useful for M-AILABS dataset if we choose to trim the extra 0.5 silence at beginning and end.
-	'''
-    # Thanks @begeekmyfriend for pointing out the params contradiction. Should we set separate params for this function?
-    return librosa.effects.trim(wav, frame_length=hparams.fft_size, hop_length=get_hop_size(hparams))[0]
+    return librosa.effects.trim(wav, top_db=hparams.trim_top_db, frame_length=hparams.trim_fft_size,
+                                hop_length=hparams.trim_hop_size)[0]
 
 
 def get_hop_size(hparams):
@@ -81,7 +101,7 @@ def inv_linear_spectrogram(linear_spectrogram, hparams):
         y = processor.istft(D).astype(np.float32)
         return y
     else:
-        return _griffin_lim(S ** hparams.power)
+        return _griffin_lim(S ** hparams.power, hparams)
 
 
 def inv_mel_spectrogram(mel_spectrogram, hparams):
@@ -99,18 +119,15 @@ def inv_mel_spectrogram(mel_spectrogram, hparams):
         y = processor.istft(D).astype(np.float32)
         return y
     else:
-        return _griffin_lim(S ** hparams.power)
+        return _griffin_lim(S ** hparams.power, hparams)
 
 
 def _lws_processor(hparams):
     import lws
-    return lws.lws(hparams.fft_size, get_hop_size(hparams), mode="speech")
+    return lws.lws(hparams.n_fft, get_hop_size(hparams), mode="speech")
 
 
 def _griffin_lim(S, hparams):
-    """librosa implementation of Griffin-Lim
-    Based on https://github.com/librosa/librosa/issues/434
-    """
     angles = np.exp(2j * np.pi * np.random.rand(*S.shape))
     S_complex = np.abs(S).astype(np.complex)
     y = _istft(S_complex * angles, hparams)
@@ -124,11 +141,11 @@ def _stft(y, hparams):
     if hparams.use_lws:
         return _lws_processor(hparams).stft(y).T
     else:
-        return librosa.stft(y=y, n_fft=hparams.fft_size, hop_length=get_hop_size(hparams))
+        return librosa.stft(y=y, n_fft=hparams.n_fft, hop_length=get_hop_size(hparams), win_length=hparams.win_size)
 
 
 def _istft(y, hparams):
-    return librosa.istft(y, hop_length=get_hop_size(hparams))
+    return librosa.istft(y, hop_length=get_hop_size(hparams), win_length=hparams.win_size)
 
 
 def num_frames(length, fsize, fshift):
@@ -142,7 +159,8 @@ def num_frames(length, fsize, fshift):
 
 
 def pad_lr(x, fsize, fshift):
-    """Compute left and right padding"""
+    """Compute left and right padding
+	"""
     M = num_frames(len(x), fsize, fshift)
     pad = (fsize - fshift)
     T = len(x) + 2 * pad
@@ -171,7 +189,7 @@ def _mel_to_linear(mel_spectrogram, hparams):
 
 def _build_mel_basis(hparams):
     assert hparams.fmax <= hparams.sample_rate // 2
-    return librosa.filters.mel(hparams.sample_rate, hparams.fft_size, n_mels=hparams.num_mels,
+    return librosa.filters.mel(hparams.sample_rate, hparams.n_fft, n_mels=hparams.num_mels,
                                fmin=hparams.fmin, fmax=hparams.fmax)
 
 
@@ -188,7 +206,7 @@ def _normalize(S, hparams):
     if hparams.allow_clipping_in_normalization:
         if hparams.symmetric_mels:
             return np.clip((2 * hparams.max_abs_value) * (
-                        (S - hparams.min_level_db) / (-hparams.min_level_db)) - hparams.max_abs_value,
+                    (S - hparams.min_level_db) / (-hparams.min_level_db)) - hparams.max_abs_value,
                            -hparams.max_abs_value, hparams.max_abs_value)
         else:
             return np.clip(hparams.max_abs_value * ((S - hparams.min_level_db) / (-hparams.min_level_db)), 0,
@@ -197,7 +215,7 @@ def _normalize(S, hparams):
     assert S.max() <= 0 and S.min() - hparams.min_level_db >= 0
     if hparams.symmetric_mels:
         return (2 * hparams.max_abs_value) * (
-                    (S - hparams.min_level_db) / (-hparams.min_level_db)) - hparams.max_abs_value
+                (S - hparams.min_level_db) / (-hparams.min_level_db)) - hparams.max_abs_value
     else:
         return hparams.max_abs_value * ((S - hparams.min_level_db) / (-hparams.min_level_db))
 
@@ -207,7 +225,7 @@ def _denormalize(D, hparams):
         if hparams.symmetric_mels:
             return (((np.clip(D, -hparams.max_abs_value,
                               hparams.max_abs_value) + hparams.max_abs_value) * -hparams.min_level_db / (
-                                 2 * hparams.max_abs_value))
+                             2 * hparams.max_abs_value))
                     + hparams.min_level_db)
         else:
             return ((np.clip(D, 0,
@@ -215,6 +233,6 @@ def _denormalize(D, hparams):
 
     if hparams.symmetric_mels:
         return (((D + hparams.max_abs_value) * -hparams.min_level_db / (
-                    2 * hparams.max_abs_value)) + hparams.min_level_db)
+                2 * hparams.max_abs_value)) + hparams.min_level_db)
     else:
         return (D * -hparams.min_level_db / hparams.max_abs_value) + hparams.min_level_db
