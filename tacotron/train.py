@@ -37,11 +37,11 @@ def add_stats(model, hp, scope):
             # Control teacher forcing ratio decay when mode = 'scheduled'
             if hp.tacotron_teacher_forcing_mode == 'scheduled':
                 tf.summary.scalar('teacher_forcing_ratio', model.ratio)
-            gradient_norms = [tf.norm(grad) for grad in model.gradients]
-            tf.summary.histogram('gradient_norm', gradient_norms)
+            # gradient_norms = [tf.norm(grad) for grad in self.gradients]
+            # tf.summary.histogram('gradient_norm', gradient_norms)
             # visualize gradients (in case of explosion)
-            tf.summary.scalar('max_gradient_norm', tf.reduce_max(gradient_norms))
-        return tf.summary.merge_all()
+            # tf.summary.scalar('max_gradient_norm', tf.reduce_max(gradient_norms))
+        return tf.summary.merge_all(scope=tf.get_variable_scope().name)
 
 
 def create_train_model(feeder, hp, global_step):
@@ -107,9 +107,9 @@ def train(log_dir, args, hp):
     train_model = create_train_model(feeder, hp, global_step)
     eval_model = create_eval_model(feeder, hp, global_step)
 
-    # save stats
-    train_stats = add_stats(train_model, hp, 'train_stats')
-    val_stats = add_stats(eval_model, hp, 'val_stats')
+    # add stats
+    train_merge = add_stats(train_model, hp, scope='train_stats')
+    val_merge = add_stats(eval_model, hp, scope='val_stats')
 
     # Book keeping
     train_time_window = ValueWindow(100)
@@ -166,7 +166,7 @@ def train(log_dir, args, hp):
 
                     if step % args.summary_interval == 0:
                         log('Writing train summary at step {}'.format(step))
-                        train_writer.add_summary(sess.run(train_stats), step)
+                        train_writer.add_summary(sess.run(train_merge), step)
 
                     if step % args.checkpoint_interval == 0:
                         # Save model and current global step
@@ -197,7 +197,7 @@ def train(log_dir, args, hp):
 
                     if global_val_step % (args.summary_interval // 10) == 0:
                         log('Writing val summary at step {}'.format(global_val_step))
-                        val_writer.add_summary(sess.run(val_stats), global_val_step)
+                        val_writer.add_summary(sess.run(val_merge), global_val_step)
 
                     global_val_step += 1
                     sys.stdout.flush()
@@ -261,10 +261,10 @@ def main():
     parser.add_argument('--checkpoint_interval', type=int, default=1000,
                         help='Steps between writing checkpoints')
     parser.add_argument('--eval_interval', type=int, default=5000,
-                        help='Steps between eval on test data')
-    parser.add_argument('--tacotron_train_epochs', type=int, default=200,
+                        help='Steps between eval on test_func data')
+    parser.add_argument('--tacotron_train_epochs', type=int, default=1000,
                         help='total number of tacotron training steps')
-    parser.add_argument('--tf_log_level', type=int, default=0, help='Tensorflow C++ log level.')
+    parser.add_argument('--tf_log_level', type=int, default=1, help='Tensorflow C++ log level.')
     args = parser.parse_args()
 
     log_dir, hp = prepare_run(args)

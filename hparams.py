@@ -50,7 +50,7 @@ hparams = tf.contrib.training.HParams(
     min_level_db=-100,
     ref_level_db=20,
     fmin=125,
-    # Set this to 75 if your speaker is male! if female, 125 should help taking off noise. (To test depending on dataset)
+    # Set this to 75 if your speaker is male! if female, 125 should help taking off noise. (To test_func depending on dataset)
     fmax=7600,
 
     # Griffin Lim
@@ -139,14 +139,14 @@ hparams = tf.contrib.training.HParams(
     tacotron_swap_with_cpu=False,
     # Whether to use cpu as support to gpu for decoder computation (Not recommended: may cause major slowdowns! Only use when critical!)
 
-    tacotron_batch_size=16,  # number of training samples on each training steps
+    tacotron_batch_size=48,  # number of training samples on each training steps
     tacotron_reg_weight=1e-6,  # regularization weight (for L2 regularization)
     tacotron_scale_regularization=True,
     # Whether to rescale regularization weight to adapt for outputs range (used when reg_weight is high and biasing the model)
 
-    tacotron_test_size=None,  # % of data to keep as test data, if None, tacotron_test_batches must be not None
-    tacotron_test_batches=48,  # number of test batches (For Ljspeech: 10% ~= 41 batches of 32 samples)
-    tacotron_data_random_state=1234,  # random state for train test split repeatability
+    tacotron_test_size=None,  # % of data to keep as test_func data, if None, tacotron_test_batches must be not None
+    tacotron_test_batches=48,  # number of test_func batches (For Ljspeech: 10% ~= 41 batches of 32 samples)
+    tacotron_data_random_state=1234,  # random state for train test_func split repeatability
 
     tacotron_decay_learning_rate=True,  # boolean, determines if the learning rate will follow an exponential decay
     tacotron_start_decay=50000,  # Step at which learning decay starts
@@ -190,14 +190,18 @@ hparams = tf.contrib.training.HParams(
     # Whether to use cpu as support to gpu for decoder computation (Not recommended: may cause major slowdowns! Only use when critical!)
 
     wavenet_batch_size=4,  # batch size used to train wavenet.
-    wavenet_test_size=0.0441,  # % of data to keep as test data, if None, wavenet_test_batches must be not None
-    wavenet_test_batches=None,  # number of test batches.
-    wavenet_data_random_state=1234,  # random state for train test split repeatability
+    wavenet_test_size=0.0441,  # % of data to keep as test_func data, if None, wavenet_test_batches must be not None
+    wavenet_test_batches=None,  # number of test_func batches.
+    wavenet_data_random_state=1234,  # random state for train test_func split repeatability
 
-    wavenet_learning_rate=1e-4,
+    wavenet_decay_learning_rate=True,
+    wavenet_init_lr=1e-3,
     wavenet_adam_beta1=0.9,
     wavenet_adam_beta2=0.999,
-    wavenet_adam_epsilon=1e-6,
+    wavenet_adam_epsilon=1e-8,
+
+    wavenet_clip_gradient=False,  # whether use clip gradients
+    wavenet_clip_thresh=1,
 
     wavenet_ema_decay=0.9999,  # decay rate of exponential moving average
 

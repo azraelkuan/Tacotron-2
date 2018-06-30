@@ -33,18 +33,15 @@ def _expand_global_features(batch_size, time_length, global_features, data_forma
     g = tf.cond(tf.equal(tf.rank(global_features), 2),
                 lambda: tf.expand_dims(global_features, axis=-1),
                 lambda: global_features)
-    g_shape = tf.shape(g)
 
     # [batch_size, channels, 1] ==> [batch_size, channels, time_length]
-    ones = tf.ones([g_shape[0], time_length, g_shape[-1]], tf.int32)
-    g = g * ones
+    g = tf.tile(g, [1, 1, time_length])
 
     if data_format == 'BTC':
-        return g
-
-    else:
-        # [batch_size, time_length, channels] ===> [batch_size, channels, time_length]
+        # [batch_size, time_length, channels]
         return tf.transpose(g, [0, 2, 1])
+    else:
+        return g
 
 
 def receptive_field_size(total_layers, stacks, kernel_size, func=lambda x: 2 ** x):
@@ -72,36 +69,35 @@ class WaveNet(object):
         self.scalar_input = util.is_scalar_input(hparams.input_type)
 
         # first convolution
-        with tf.variable_scope('input_conv'):
-            self.first_conv = Conv1d1x1(filters=hparams.residual_channels, name='input_convolution')
+
+        self.first_conv = Conv1d1x1(filters=hparams.residual_channels, name='input_convolution')
 
         # Residual convolutions
         self.conv_layers = []
         for layer in range(hparams.layers):
-            with tf.variable_scope('ResidualConv1dGLU_{}'.format(layer)) as scope:
-                self.conv_layers.append(
-                    ResidualConv1dGLU(
-                        residual_channels=hparams.residual_channels,
-                        gate_channels=hparams.gate_channels,
-                        kernel_size=hparams.kernel_size,
-                        skip_out_channels=hparams.skip_out_channels,
-                        use_bias=hparams.use_bias,
-                        dilation=2 ** (layer % layers_per_stack),
-                        dropout=hparams.wavenet_dropout,
-                        cin_channels=hparams.cin_channels,
-                        gin_channels=hparams.gin_channels,
-                        name='layer_{}'.format(scope)
-                    )
+            self.conv_layers.append(
+                ResidualConv1dGLU(
+                    residual_channels=hparams.residual_channels,
+                    gate_channels=hparams.gate_channels,
+                    kernel_size=hparams.kernel_size,
+                    skip_out_channels=hparams.skip_out_channels,
+                    use_bias=hparams.use_bias,
+                    dilation=2 ** (layer % layers_per_stack),
+                    dropout=hparams.wavenet_dropout,
+                    cin_channels=hparams.cin_channels,
+                    gin_channels=hparams.gin_channels,
+                    scope='ResidualConv1dGLU_{}'.format(layer),
                 )
+            )
 
         # Skip convolutions
-        with tf.variable_scope('skip_conv'):
-            self.last_conv_layers = [
-                ReLU(name='final_conv_relu_1'),
-                Conv1d1x1(hparams.skip_out_channels, name='final_conv_1'),
-                ReLU(name='final_conv_relu_2'),
-                Conv1d1x1(hparams.out_channels, name="final_conv_2")
-            ]
+
+        self.last_conv_layers = [
+            ReLU(name='final_relu_1'),
+            Conv1d1x1(hparams.skip_out_channels, name='final_conv_1'),
+            ReLU(name='finaL_relu_2'),
+            Conv1d1x1(hparams.out_channels, name="final_conv_2")
+        ]
 
         # Global condition embedding
         if hparams.gin_channels > 0 and hparams.use_speaker_embedding:
@@ -114,14 +110,16 @@ class WaveNet(object):
         if hparams.upsample_conditional_features:
             self.upsample_conv = []
             for i, s in enumerate(hparams.upsample_scales):
-                with tf.variable_scope('local_conditioning_upsampling_{}'.format(i + 1)):
-                    convt = ConvTransposed2d(1, s, hparams.freq_axis_kernel_size,
-                                             padding='same', strides=(s, 1))
+                    convt = ConvTransposed2d(1, s, hparams.freq_axis_kernel_size, padding='same', strides=(s, 1),
+                                             scope='local_conditioning_upsample_{}'.format(i + 1))
                     self.upsample_conv.append(convt)
         else:
             self.upsample_conv = None
 
-        self.all_convs = [self.first_conv] + self.conv_layers + self.last_conv_layers + self.upsample_conv
+        if hparams.upsample_conditional_features:
+            self.all_convs = [self.first_conv] + self.conv_layers + self.last_conv_layers + self.upsample_conv
+        else:
+            self.all_convs = [self.first_conv] + self.conv_layers + self.last_conv_layers
 
         self.receptive_field = receptive_field_size(hparams.layers, hparams.stacks, hparams.kernel_size)
 
@@ -140,7 +138,7 @@ class WaveNet(object):
                 pass
 
     def initialize(self, y, c, g, input_lengths, x=None, synthesis_length=None):
-        """ Initialize wavenet graph for train, eval and test cases.
+        """ Initialize wavenet graph for train, eval and test_func cases.
 
         Args:
             y: target [B x T]
@@ -163,11 +161,12 @@ class WaveNet(object):
         log('  Eval mode:                 {}'.format(self.is_evaluating))
         log('  Synthesis mode:            {}'.format(not (self.is_training or self.is_evaluating)))
 
-        if util.is_mulaw_quantize(self.hp.input_type):
-            x = tf.one_hot(tf.cast(x, tf.int32), self.hp.quantize_channels)
-        else:
-            x = tf.expand_dims(x, axis=-1)
-        tf.assert_equal(tf.rank(x), 3, name='assert_x_shape')
+        if self.is_training:
+            if util.is_mulaw_quantize(self.hp.input_type):
+                x = tf.one_hot(tf.cast(x, tf.int32), self.hp.quantize_channels)
+            else:
+                x = tf.expand_dims(x, axis=-1)
+            tf.assert_equal(tf.rank(x), 3, name='assert_x_shape')
 
         with tf.variable_scope("inference"):
             # =========================== Training =========================== #
@@ -206,18 +205,24 @@ class WaveNet(object):
                 self.y_hat_log = y_hat_log
 
             elif self.is_evaluating:
+                test_inputs = tf.one_hot(tf.cast(y, tf.int32), self.hp.quantize_channels)
+
                 # eval one sentence use incremental forward for testing
                 idx = 0
                 length = input_lengths[idx]
-                y_target = tf.reshape(y[idx], [-1])[:length]
+                y_target = tf.reshape(y[idx], [-1])[:length]  # [T, ]
 
                 if c is not None:
-                    c = tf.expand_dims(c[idx, :length, :], axis=0)
+                    if self.hp.upsample_conditional_features:
+                        c = tf.expand_dims(c[idx, :length//audio.get_hop_size(self.hp), :], axis=0)
+                    else:
+                        c = tf.expand_dims(c[idx, :length, :], axis=0)
+                    # [1 T_c C]
                     with tf.control_dependencies([tf.assert_equal(tf.rank(c), 3)]):
                         c = tf.identity(c, name='eval_assert_c_rank_op')
 
                 if g is not None:
-                    g = g[idx]
+                    g = g[idx]  # [1, ]
 
                 if util.is_mulaw_quantize(self.hp.input_type):
                     initial_value = util.mulaw_quantize(0, self.hp.quantize_channels)
@@ -226,6 +231,9 @@ class WaveNet(object):
                 else:
                     initial_value = 0.
 
+                print('eval initial value: {}'.format(initial_value))
+
+                # initial input [1 1 C_initial]
                 if util.is_mulaw_quantize(self.hp.input_type):
                     initial_input = tf.one_hot(initial_value, depth=self.hp.quantize_channels)
                     initial_input = tf.reshape(initial_input, [1, 1, self.hp.quantize_channels])
@@ -243,6 +251,7 @@ class WaveNet(object):
                 self.eval_length = length
 
                 if util.is_mulaw_quantize(self.hp.input_type):
+                    # y_hat [B x T x C]
                     y_hat = tf.reshape(tf.argmax(y_hat, axis=-1), [-1])
                 else:
                     y_hat = tf.reshape(y_hat, [-1])
@@ -287,7 +296,7 @@ class WaveNet(object):
         g_btc = _expand_global_features(batch_size, time_length, g, data_format='BTC')
 
         # prepare local condition [B T cin_channels] ==> [B new_T cin_channels]
-        if c is not None:
+        if c is not None and self.upsample_conv is not None:
             c = tf.expand_dims(c, axis=-1)  # [B T cin_channels 1]
             for transposed_conv in self.upsample_conv:
                 c = transposed_conv(c)
@@ -330,7 +339,6 @@ class WaveNet(object):
         """
         self.clear_buffer()
         batch_size = 1
-
         if test_inputs is not None:
             batch_size = tf.shape(test_inputs)[0]
             if time_length is None:
@@ -343,6 +351,7 @@ class WaveNet(object):
             if self.embed_speakers is not None:
                 g = self.embed_speakers(tf.reshape(g, [batch_size, -1]))
 
+        # [B T C]
         self.g_btc = _expand_global_features(batch_size, time_length, g, data_format='BTC')
 
         # local condition
@@ -359,10 +368,11 @@ class WaveNet(object):
         initial_time = tf.constant(0, dtype=tf.int32)
         if test_inputs is not None:
             initial_input = tf.expand_dims(test_inputs[:, 0, :], axis=1)
+
         initial_outputs_ta = tf.TensorArray(dtype=tf.float32, size=0, dynamic_size=True)
         initial_debug_outputs_ta = tf.TensorArray(dtype=tf.float32, size=0, dynamic_size=True)
 
-        def condition(time):
+        def condition(time, initial_input, initial_outputs_ta, initial_debug_outputs_ta):
             return tf.less(time, time_length)
 
         def body(time, current_input, outputs_ta, debug_outputs_ta):
@@ -373,7 +383,7 @@ class WaveNet(object):
             x = self.first_conv.incremental_forward(current_input)
             skips = None
             for conv in self.conv_layers:
-                x, h = conv.incremental_forward(x, current_c, current_g)
+                x, h = conv.incremental_forward(x, current_c, current_g, scope=conv.scope)
                 skips = h if skips is None else (skips + h)
             x = skips
             for conv in self.last_conv_layers:
@@ -381,30 +391,34 @@ class WaveNet(object):
                     x = conv.incremental_forward(x)
                 except AttributeError:
                     x = conv(x)
-
+            # x [1, 1, 256]
             debug_outputs_ta = debug_outputs_ta.write(time, tf.squeeze(x, axis=1))  # squeeze time dim
 
             if self.scalar_input:
                 x = sample_from_discretized_mix_logistic(tf.reshape(x, [batch_size, -1, 1]),
                                                          log_scale_min=log_scale_min)
             else:
+                # [1 256]
                 x = tf.nn.softmax(tf.reshape(x, [batch_size, -1]), axis=1) \
                     if softmax else tf.reshape(x, [batch_size, -1])
                 if quantize:
-                    x = tf.reshape(x, [batch_size, -1])
-                    sample = tf.multinomial(tf.reshape(x, [batch_size, -1]), 1)[0]
+                    # sample = tf.multinomial(x, 1)[0]  # [1, ] only one sample
+                    sample = tf.py_func(np.random.choice,
+                                        [np.arange(self.hp.out_channels), 1, True, tf.reshape(x, [-1])], tf.int64)
+                    sample = tf.reshape(sample, [1, ])
+                    # [1, 256],
                     x = tf.one_hot(sample, depth=self.hp.quantize_channels)
 
             outputs_ta = outputs_ta.write(time, x)
 
             time = time + 1
             if test_inputs is not None:
-                next_input = tf.expand_dims(test_inputs[:, time, :], axis=1)
+                next_input = tf.cond(tf.less(time, tf.shape(test_inputs)[1]),
+                                     lambda: tf.expand_dims(test_inputs[:, time, :], axis=1),
+                                     lambda: initial_input)
             else:
-                if util.is_mulaw_quantize(self.hp.input_type):
-                    next_input = tf.expand_dims(x, axis=1)
-                else:
-                    next_input = tf.expand_dims(x, axis=-1)
+                # [1, 1, 256]
+                next_input = tf.expand_dims(x, axis=1)
 
             return time, next_input, outputs_ta, debug_outputs_ta
 
@@ -417,6 +431,10 @@ class WaveNet(object):
         # [T B C]
         outputs = outputs_ta.stack()
         eval_outputs = result[-1].stack()
+
+        # [B T C]
+        outputs = tf.transpose(outputs, [1, 0, 2])
+        eval_outputs = tf.transpose(eval_outputs, [1, 0, 2])
 
         self.y_hat_eval = eval_outputs  # for debug
 
@@ -454,15 +472,23 @@ class WaveNet(object):
         with tf.variable_scope('optimizer'):
             hp = self.hp
 
+            if hp.wavenet_decay_learning_rate:
+                self.learning_rate = _learning_rate_decay(hp.wavenet_init_lr, global_step)
+            else:
+                self.learning_rate = tf.convert_to_tensor(hp.wavenet_init_lr)
+
             # Adam with constant learning rate
-            optimizer = tf.train.AdamOptimizer(hp.wavenet_learning_rate, hp.wavenet_adam_beta1,
+            optimizer = tf.train.AdamOptimizer(self.learning_rate, hp.wavenet_adam_beta1,
                                                hp.wavenet_adam_beta2, hp.wavenet_adam_epsilon)
 
             gradients, variables = zip(*optimizer.compute_gradients(self.loss))
             self.gradients = gradients
 
             # Gradients clipping
-            clipped_gradients, _ = tf.clip_by_global_norm(gradients, 1.)
+            if hp.wavenet_clip_gradient:
+                clipped_gradients, _ = tf.clip_by_global_norm(gradients, hp.wavenet_clip_thresh)
+            else:
+                clipped_gradients = gradients
 
             with tf.control_dependencies(tf.get_collection(tf.GraphKeys.UPDATE_OPS)):
                 adam_optimize = optimizer.apply_gradients(zip(clipped_gradients, variables),
@@ -478,3 +504,9 @@ class WaveNet(object):
             assert tuple(self.variables) == variables  # Verify all trainable variables are being averaged
             self.optimize = self.ema.apply(variables)
 
+
+def _learning_rate_decay(init_lr, global_step):
+    # Noam scheme from tensor2tensor:
+    warmup_steps = 4000.0
+    step = tf.cast(global_step + 1, dtype=tf.float32)
+    return init_lr * warmup_steps ** 0.5 * tf.minimum(step * warmup_steps ** -1.5, step ** -0.5)

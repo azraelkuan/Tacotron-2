@@ -1,9 +1,9 @@
 import numpy as np
 import tensorflow as tf
-import librosa.display as dsp
 import matplotlib
-
 matplotlib.use('Agg')
+import librosa.display as dsp
+
 import matplotlib.pyplot as plt
 
 

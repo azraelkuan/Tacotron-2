@@ -6,10 +6,9 @@ import tensorflow as tf
 from tacotron.utils.text import text_to_sequence
 from hparams import hparams
 
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 
-_batches_per_group = 32
+_batches_per_group = 10
 # pad input sequences with the <pad_token> 0 ( _ )
 _pad = 0
 # explicitly setting the padding to a value that doesn't originally exist in the spectrogram
